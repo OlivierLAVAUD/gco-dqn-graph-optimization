@@ -64,11 +64,22 @@ compétences requises, **tout en minimisant la perturbation** des départements 
 ```mermaid
 flowchart LR
     Neo4j[Neo4j\nGraphe organisationnel] -->|Cypher| Store[Neo4jStore\nsrc/db/]
-    Store -->|NetworkX| Env[Environnement Gym\nTeamFormationEnv]
-    Env -->|coverage, disruption| QNet[Q-Network\ngnn_encoder.py]
-    QNet -->|GAT embeddings| Agent[GCODQNAgent\ndqn_agent.py]
+    Store -->|export_graph\\nNetworkX| Env[Environnement Gym\nTeamFormationEnv]
+    Agent[GCODQNAgent\ndqn_agent.py] -->|possède| QNet[TeamFormationQNetwork\ngnn_encoder.py\nGAT + têtes add/remove/term]
+    Env -->|state_masks\\nvia src/train.py| Agent
     Agent -->|add / remove / terminate| Env
 ```
+
+**Flux de données (une boucle d'épisode)** :
+
+1. `Neo4jStore.export_graph()` → `nx.Graph` (NetworkX)
+2. `TeamFormationEnv(graph, project_skills, all_skills)` — l'env pré-calcule les
+   features statiques (`[N, S+2]`), `edge_index` et `project_skill_mask()`
+3. `agent.set_graph(features, edges, skill_matrix, project_mask)` — graphe statique
+   transféré **une seule fois** sur le device
+4. Boucle : `state_masks(env)` → `(mask, cov)` → `agent.select_action(mask, cov,
+   valid_actions)` → `env.step(action)` → `agent.store_transition(..., next_valid)` →
+   `agent.train_step()` (4× par pas d'env, `grad_steps_per_env_step`)
 
 **Composants clés** :
 - `src/db/neo4j_store.py` : persistance Neo4j (schéma, chargement, requêtes Cypher)
@@ -230,12 +241,16 @@ r_t =  − step_penalty                                        # coût de chaque
        − remove_penalty              (si action remove)      # décourage le yo-yo
        + skill_weight × Δcoverage     (si add)               # nouvelles compétences PROJET
        − skill_weight × Δlost         (si remove)            # compétences projet perdues
-       − disruption_weight × perturbation marginale          # coût social
-       − size_penalty                 (si add)               # pression vers équipes minimales
+       − disruption_weight × perturbation / n_depts_affected  # coût social, normalisé
+       − size_penalty                 (si add OU remove)     # pression vers équipes minimales
        − delay_penalty                (si couverture déjà complète)
        + completion_bonus             (si terminate, projet complet)
        − skill_weight × (1 − coverage)  (si terminate, projet incomplet)
 ```
+
+> **Détail** : `perturbation` est calculée incrémentalement par `DisruptionTracker`
+> (O(deg) par mutation) puis **normalisée par le nombre de départements affectés**
+> (`max(1, len(affected_departments))`) — voir `src/environment/team_formation_env.py::_reward`.
 
 ### Q-Network (par nœud)
 
@@ -246,14 +261,18 @@ add_q(i)    = f([emb_i, selected_i, skill_match_i])            # tête partagée
 remove_q(i) = h([emb_i, selected_i, skill_match_i])            # tête distincte
 terminate_q = g([coverage, project_coverage, mean_emb])         # tête de terminaison
 
-emb_i      = GAT(node_features, edges)                          # embeddings GNN
+emb_i      = GATConv(x, edges, heads=4, concat=False, dropout)   # embeddings GNN
+             # x = [skills one-hot, level/5, degree/N]  (S+2 features statiques)
 skill_match_i = 1 si l'employé i couvre une compétence REQUISE non couverte
+mean_emb   = moyenne des embeddings des employés sélectionnés
 ```
 
 ### Optimisation (Double DQN masqué)
 
 ```
 y = r + γ · Q_target(s', argmax_a Q_online(s', a) masqué par les actions valides)
+loss = smooth_l1_loss(Q(s, a_pris), y)                          # Huber
+clip_grad_norm_(1.0)                                            # stabilisation
 ```
 
 Le masquage AVANT l'argmax évite la surestimation par des actions invalides

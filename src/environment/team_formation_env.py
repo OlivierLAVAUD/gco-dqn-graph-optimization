@@ -34,14 +34,13 @@ from src.graph.metrics import DisruptionTracker, skill_coverage
 class TeamFormationEnv(gym.Env):
     """L'agent ajoute (et optionnellement retire) des employés, puis termine.
 
-    Actions (si allow_removal=False) :
-        i < n_nodes    : sélectionner l'employé i
-        n_nodes        : terminer
+    Espace d'action unifié (toujours 2N+1, indépendant de allow_removal) :
+        i < N        : ajouter l'employé i
+        N <= i < 2N  : retirer l'employé (i - N)   [masqué si allow_removal=False]
+        i = 2N       : terminer
 
-    Actions (si allow_removal=True) :
-        i < n_nodes          : ajouter l'employé i
-        n_nodes <= i < 2N    : retirer l'employé (i - n_nodes)
-        2*n_nodes            : terminer
+    Quand allow_removal=False, les actions "remove" sont décodées mais
+    rejetées par valid_actions() → l'agent ne peut jamais les sélectionner.
     """
 
     TERMINATE = None  # sentinel
