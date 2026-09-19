@@ -1,0 +1,45 @@
+data:
+  source: json              # json | neo4j | auto (neo4j si dispo, sinon json)
+  json_path: data/sample_org.json
+  n_employees: 500          # 200 → 500   (plus de candidats)
+  n_departments: 15         # 8 → 15      (plus de diversité)
+  n_skills: 50              # 15 → 50     (skills plus dispersées)
+  avg_skills_per_emp: 2.5   # 4 → 2.5     (finis les couteaux suisses)
+  communication_prob: 0.03  # 0.02 → 0.03 (plus de communications)
+  n_required_skills: 12     # 5 → 12      (projet réaliste)
+
+env:
+  max_team_size: 20         # 15 → 20     (marge pour 12 skills)
+  skill_weight: 2.0
+  disruption_weight: 0.5
+  step_penalty: 0.01
+  completion_bonus: 5.0     # 10.0 → 5.0  (assez fort pour surmonter le coût du chemin, plus doux pour l'échelle des Q)
+  size_penalty: 0.15        # NE PAS augmenter : > 2.0*2/12 = 0.33 rendrait tout ajout non rentable
+  delay_penalty: 1.0        # pénalité si on recrute alors que la couverture est déjà complète
+  allow_removal: true       # cœur de GCO-DQN : l'agent peut retirer un employé
+  remove_penalty: 0.2       # 2.0 → 0.2   (rend le retrait exploitable au lieu de proscrit)
+
+agent:
+  gnn_hidden_dim: 64
+  q_hidden_dim: 128
+  n_gnn_layers: 3
+  dropout: 0.1
+  lr: 1.0e-4
+  gamma: 0.99
+  epsilon_start: 1.0
+  epsilon_end: 0.05
+  epsilon_decay: 0.98       # déclin par ÉPISODE (fix du PoC initial)
+  buffer_capacity: 10000
+  batch_size: 64            # 32 → 64  (GPU → batch plus grand, meilleur gradient)
+  target_update_freq: 50
+  grad_steps_per_env_step: 4  # pas d'optimisation par step d'environnement
+
+train:
+  n_episodes: 500
+  eval_every: 50
+  eval_episodes: 5
+
+output:
+  dir: outputs
+
+seed: 42

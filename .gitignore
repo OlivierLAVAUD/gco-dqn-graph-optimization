@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Environnement
+.env
+
+# Sorties d'entraînement (régénérables)
+outputs/*.pt
+outputs/*.png
+outputs/*.json
+
+# Divers
+*.swp
+.DS_Store

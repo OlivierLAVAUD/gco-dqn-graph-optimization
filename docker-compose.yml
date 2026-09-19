@@ -1,0 +1,39 @@
+services:
+  neo4j:
+    image: neo4j:5-community
+    container_name: gcodqn-neo4j
+    environment:
+      NEO4J_AUTH: neo4j/gcodqn-poc
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  app:
+    build: .
+    container_name: gcodqn-app
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: gcodqn-poc
+      CUDA_VISIBLE_DEVICES: "0"
+    volumes:
+      - ./src:/app/src
+      - ./tests:/app/tests
+      - ./config.yaml:/app/config.yaml
+      - ./data:/app/data
+      - ./outputs:/app/outputs
+    gpus: all
+
+volumes:
+  neo4j_data:

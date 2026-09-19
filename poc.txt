@@ -1,0 +1,1126 @@
+Proof of Concept : Formation d'équipes dans les grandes organisations via Deep Reinforcement Learning (GCO-DQN)
+1. Résumé de l'article
+
+L'article propose GCO-DQN (Graph Combinatorial Optimization - Deep Q-Network), un framework qui combine :
+
+    Reinforcement Learning (RL) : un agent DQN qui apprend à sélectionner/remplacer des employés
+
+    Graph Neural Networks (GNN) : pour apprendre des représentations des employés (nœuds) à partir de leurs compétences, informations de base et patterns de communication
+
+Problème résolu : Former une équipe projet qui :
+
+    Couvre les compétences requises
+
+    Minimise la perturbation du réseau organisationnel d'origine (départements)
+
+2. Modélisation du problème
+2.1 Représentation en graphe
+
+    Nœuds = employés
+
+    Arêtes = communications entre employés
+
+    Attributs de nœuds = compétences, département, niveau hiérarchique
+
+2.2 Objectif d'optimisation
+text
+
+minimiser : Impact_organisationnel(S) 
+sous contrainte : Compétences_couvertes(S) ⊇ Besoins_projet
+où S = sous-ensemble d'employés sélectionnés
+
+2.3 Processus de décision
+
+    État : graphe actuel + ensemble d'employés sélectionnés
+
+    Action : ajouter/retirer un employé
+
+    Récompense : couverture des compétences - pénalité de perturbation
+
+3. Architecture proposée pour le PoC
+text
+
+┌─────────────────────────────────────────────────────────┐
+│                    GCO-DQN Framework                    │
+├─────────────────────────────────────────────────────────┤
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │   Graphe    │───▶│    GNN      │───▶│  Embeddings │  │
+│  │ Organisa.   │    │  Encoder    │    │  Employés   │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘  │
+│                                                │        │
+│                                                ▼        │
+│  ┌─────────────┐    ┌─────────────┐    ┌─────────────┐  │
+│  │   DQN       │◀───│   Q-Value   │◀───│    État     │  │
+│  │   Agent     │    │   Network   │    │   Concaténé │  │
+│  └─────────────┘    └─────────────┘    └─────────────┘  │
+│         │                                               │
+│         ▼                                               │
+│  ┌─────────────┐                                       │
+│  │   Action    │ : Ajouter/Retirer employé             │
+│  └─────────────┘                                       │
+└─────────────────────────────────────────────────────────┘
+
+4. Implémentation du PoC
+4.1 Structure du projet
+text
+
+gco-dqn-poc/
+├── data/
+│   ├── generate_synthetic.py   # Génération de données synthétiques
+│   └── sample_org.json         # Exemple d'organisation
+├── src/
+│   ├── graph/
+│   │   ├── org_graph.py        # Classe de graphe organisationnel
+│   │   └── metrics.py          # Métriques de perturbation
+│   ├── models/
+│   │   ├── gnn_encoder.py      # Encodeur GNN
+│   │   └── dqn_agent.py        # Agent DQN
+│   ├── environment/
+│   │   └── team_formation_env.py  # Environnement Gym
+│   └── train.py                # Script d'entraînement
+├── config.yaml
+└── requirements.txt
+
+4.2 Code : Génération de données synthétiques
+python
+
+# data/generate_synthetic.py
+import numpy as np
+import networkx as nx
+import json
+from dataclasses import dataclass
+from typing import List, Dict, Set
+
+@dataclass
+class Employee:
+    id: int
+    name: str
+    department: str
+    skills: Set[str]
+    level: int  # 1-5
+    communication_degree: int
+
+def generate_organization(
+    n_employees: int = 200,
+    n_departments: int = 8,
+    n_skills: int = 15,
+    avg_skills_per_emp: int = 4,
+    communication_prob: float = 0.02
+) -> tuple:
+    """
+    Génère une organisation synthétique sous forme de graphe.
+    
+    Returns:
+        G: networkx.Graph avec attributs sur les nœuds
+        employees: liste des employés
+    """
+    all_skills = [f"skill_{i}" for i in range(n_skills)]
+    departments = [f"dept_{i}" for i in range(n_departments)]
+    
+    G = nx.Graph()
+    employees = []
+    
+    for i in range(n_employees):
+        # Assigner des compétences (avec biais par département)
+        dept = np.random.choice(departments)
+        dept_idx = departments.index(dept)
+        
+        # Biais : employés du même département ont des skills similaires
+        skill_weights = np.ones(n_skills)
+        skill_weights[dept_idx % n_skills:(dept_idx % n_skills) + 3] *= 3
+        skill_weights /= skill_weights.sum()
+        
+        n_skills_emp = np.random.poisson(avg_skills_per_emp)
+        skills = set(np.random.choice(
+            all_skills, 
+            size=min(n_skills_emp, n_skills), 
+            replace=False, 
+            p=skill_weights
+        ))
+        
+        emp = Employee(
+            id=i,
+            name=f"Employee_{i}",
+            department=dept,
+            skills=skills,
+            level=np.random.randint(1, 6),
+            communication_degree=0
+        )
+        employees.append(emp)
+        
+        # Ajouter le nœud avec attributs
+        G.add_node(
+            i,
+            department=dept,
+            skills=skills,
+            level=emp.level,
+            skill_vector=np.array([1 if s in skills else 0 for s in all_skills])
+        )
+    
+    # Créer les arêtes (communications)
+    # Biais : plus de communications intra-département
+    for i in range(n_employees):
+        for j in range(i + 1, n_employees):
+            same_dept = employees[i].department == employees[j].department
+            
+            if same_dept:
+                prob = communication_prob * 8  # Plus de comm intra-dept
+            else:
+                prob = communication_prob * 0.5  # Moins inter-dept
+            
+            # Biais par niveau hiérarchique
+            level_diff = abs(employees[i].level - employees[j].level)
+            prob *= (1.0 / (1.0 + level_diff * 0.3))
+            
+            if np.random.random() < prob:
+                G.add_edge(i, j, weight=1.0)
+    
+    # Mettre à jour les degrés
+    for emp in employees:
+        emp.communication_degree = G.degree(emp.id)
+    
+    return G, employees, all_skills
+
+def generate_project_requirements(
+    all_skills: List[str],
+    n_required_skills: int = 5,
+    seed: int = None
+) -> Set[str]:
+    """Génère les compétences requises pour un projet."""
+    if seed is not None:
+        np.random.seed(seed)
+    return set(np.random.choice(all_skills, size=n_required_skills, replace=False))
+
+if __name__ == "__main__":
+    G, employees, all_skills = generate_organization()
+    project_skills = generate_project_requirements(all_skills)
+    
+    print(f"Organisation: {G.number_of_nodes()} employés, {G.number_of_edges()} connexions")
+    print(f"Compétences projet requises: {project_skills}")
+    
+    # Sauvegarder
+    data = {
+        "n_nodes": G.number_of_nodes(),
+        "edges": list(G.edges()),
+        "nodes": [
+            {
+                "id": e.id,
+                "department": e.department,
+                "skills": list(e.skills),
+                "level": e.level
+            }
+            for e in employees
+        ],
+        "all_skills": all_skills,
+        "project_skills": list(project_skills)
+    }
+    with open("data/sample_org.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+4.3 Code : Environnement de formation d'équipe
+python
+
+# src/environment/team_formation_env.py
+import numpy as np
+import networkx as nx
+from typing import Set, List, Tuple, Dict
+import gymnasium as gym
+from gymnasium import spaces
+
+class TeamFormationEnv(gym.Env):
+    """
+    Environnement Gym pour la formation d'équipe.
+    
+    L'agent sélectionne itérativement des employés pour former une équipe
+    qui couvre les compétences requises tout en minimisant la perturbation
+    organisationnelle.
+    """
+    
+    def __init__(
+        self,
+        graph: nx.Graph,
+        project_skills: Set[str],
+        all_skills: List[str],
+        max_team_size: int = 20,
+        skill_weight: float = 1.0,
+        disruption_weight: float = 0.5,
+        step_penalty: float = 0.01
+    ):
+        super().__init__()
+        
+        self.graph = graph
+        self.project_skills = project_skills
+        self.all_skills = all_skills
+        self.max_team_size = max_team_size
+        self.skill_weight = skill_weight
+        self.disruption_weight = disruption_weight
+        self.step_penalty = step_penalty
+        
+        self.n_nodes = graph.number_of_nodes()
+        
+        # Espace d'action : sélectionner un employé (0 à n-1) ou terminer (n)
+        self.action_space = spaces.Discrete(self.n_nodes + 1)
+        
+        # Espace d'observation : état encodé
+        # Pour simplifier : vecteur de sélection + couverture skills + features
+        n_skills = len(all_skills)
+        obs_dim = self.n_nodes + n_skills + self.n_nodes  # sélection + skills + node features
+        self.observation_space = spaces.Box(
+            low=0, high=1, shape=(obs_dim,), dtype=np.float32
+        )
+        
+        self.reset()
+    
+    def reset(self, seed=None, options=None):
+        """Réinitialise l'environnement."""
+        if seed is not None:
+            np.random.seed(seed)
+        
+        # Ensemble des employés sélectionnés
+        self.selected = set()
+        
+        # Compétences couvertes
+        self.covered_skills = set()
+        
+        # Historique des actions
+        self.action_history = []
+        
+        # État
+        self.done = False
+        self.current_step = 0
+        
+        return self._get_observation(), {}
+    
+    def _get_observation(self) -> np.ndarray:
+        """Construit le vecteur d'observation."""
+        # Indicateur de sélection (one-hot)
+        selection = np.zeros(self.n_nodes, dtype=np.float32)
+        for i in self.selected:
+            selection[i] = 1.0
+        
+        # Couverture des compétences
+        skill_coverage = np.zeros(len(self.all_skills), dtype=np.float32)
+        for i, skill in enumerate(self.all_skills):
+            if skill in self.covered_skills:
+                skill_coverage[i] = 1.0
+        
+        # Features des nœuds (normalisées)
+        node_features = np.zeros(self.n_nodes, dtype=np.float32)
+        for i in range(self.n_nodes):
+            node_features[i] = self.graph.degree(i) / max(1, self.n_nodes - 1)
+        
+        return np.concatenate([selection, skill_coverage, node_features])
+    
+    def _compute_disruption(self) -> float:
+        """
+        Calcule la perturbation organisationnelle.
+        
+        Mesure : somme des connexions perdues / connexions totales des départements affectés.
+        """
+        if not self.selected:
+            return 0.0
+        
+        # Identifier les départements affectés
+        affected_depts = set()
+        for i in self.selected:
+            dept = self.graph.nodes[i].get('department', 'unknown')
+            affected_depts.add(dept)
+        
+        # Calculer la perturbation pour chaque département
+        total_disruption = 0.0
+        for dept in affected_depts:
+            dept_nodes = [
+                n for n in self.graph.nodes
+                if self.graph.nodes[n].get('department') == dept
+            ]
+            
+            # Connexions internes du département
+            dept_edges = [
+                (u, v) for u, v in self.graph.edges
+                if u in dept_nodes and v in dept_nodes
+            ]
+            
+            if not dept_edges:
+                continue
+            
+            # Connexions perdues
+            lost_edges = sum(
+                1 for u, v in dept_edges
+                if (u in self.selected) != (v in self.selected)
+            )
+            
+            total_disruption += lost_edges / len(dept_edges)
+        
+        return total_disruption / len(affected_depts) if affected_depts else 0.0
+    
+    def _compute_skill_coverage(self) -> float:
+        """Calcule le pourcentage de compétences couvertes."""
+        if not self.project_skills:
+            return 1.0
+        return len(self.covered_skills & self.project_skills) / len(self.project_skills)
+    
+    def _compute_reward(self, action: int, done: bool) -> float:
+        """Calcule la récompense."""
+        # Récompense pour couverture de compétences
+        coverage_reward = self.skill_weight * self._compute_skill_coverage()
+        
+        # Pénalité pour perturbation
+        disruption_penalty = self.disruption_weight * self._compute_disruption()
+        
+        # Pénalité par étape
+        step_cost = self.step_penalty
+        
+        # Bonus pour complétion
+        completion_bonus = 0.0
+        if done and self.covered_skills >= self.project_skills:
+            completion_bonus = 10.0
+        
+        return coverage_reward - disruption_penalty - step_cost + completion_bonus
+    
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        """Exécute une action."""
+        self.current_step += 1
+        
+        terminated = False
+        truncated = False
+        
+        if action == self.n_nodes:
+            # Action de terminaison
+            terminated = True
+        elif action in self.selected:
+            # Déjà sélectionné - pénalité
+            reward = -1.0
+            return self._get_observation(), reward, False, False, {"error": "already_selected"}
+        else:
+            # Ajouter l'employé
+            self.selected.add(action)
+            self.action_history.append(action)
+            
+            # Mettre à jour les compétences couvertes
+            emp_skills = self.graph.nodes[action].get('skills', set())
+            self.covered_skills.update(emp_skills)
+            
+            # Vérifier si l'équipe est complète
+            if len(self.selected) >= self.max_team_size:
+                terminated = True
+            elif self.covered_skills >= self.project_skills:
+                # Toutes les compétences couvertes - possibilité de terminer
+                pass
+        
+        # Calculer la récompense
+        reward = self._compute_reward(action, terminated)
+        
+        info = {
+            "selected": list(self.selected),
+            "covered_skills": list(self.covered_skills),
+            "skill_coverage": self._compute_skill_coverage(),
+            "disruption": self._compute_disruption()
+        }
+        
+        return self._get_observation(), reward, terminated, truncated, info
+
+4.4 Code : Encodeur GNN
+python
+
+# src/models/gnn_encoder.py
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import GCNConv, GATConv, global_mean_pool
+from torch_geometric.data import Data, Batch
+
+class EmployeeGNNEncoder(nn.Module):
+    """
+    Encodeur GNN pour apprendre les représentations des employés.
+    
+    Utilise les attributs des nœuds (skills, département, niveau)
+    et la structure du graphe (communications).
+    """
+    
+    def __init__(
+        self,
+        n_skills: int,
+        hidden_dim: int = 64,
+        n_layers: int = 3,
+        dropout: float = 0.1,
+        use_gat: bool = True
+    ):
+        super().__init__()
+        
+        self.n_skills = n_skills
+        self.hidden_dim = hidden_dim
+        
+        # Projection initiale des features
+        # Features : skills (n_skills) + level (1) + degree (1) + dept_embedding
+        self.input_dim = n_skills + 2
+        self.input_proj = nn.Linear(self.input_dim, hidden_dim)
+        
+        # Couches GNN
+        self.convs = nn.ModuleList()
+        for i in range(n_layers):
+            if use_gat:
+                self.convs.append(GATConv(
+                    hidden_dim if i > 0 else hidden_dim,
+                    hidden_dim,
+                    heads=4,
+                    concat=False,
+                    dropout=dropout
+                ))
+            else:
+                self.convs.append(GCNConv(
+                    hidden_dim if i > 0 else hidden_dim,
+                    hidden_dim
+                ))
+        
+        # Normalisation
+        self.norms = nn.ModuleList([
+            nn.LayerNorm(hidden_dim) for _ in range(n_layers)
+        ])
+        
+        self.dropout = nn.Dropout(dropout)
+        
+        # Projection finale
+        self.output_proj = nn.Linear(hidden_dim, hidden_dim)
+    
+    def forward(
+        self,
+        x: torch.Tensor,
+        edge_index: torch.Tensor,
+        batch: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            x: Features des nœuds [n_nodes, input_dim]
+            edge_index: Indices des arêtes [2, n_edges]
+            batch: Indices de batch [n_nodes]
+        
+        Returns:
+            Embeddings des nœuds [n_nodes, hidden_dim]
+        """
+        # Projection initiale
+        h = self.input_proj(x)
+        h = F.relu(h)
+        
+        # Couches GNN
+        for conv, norm in zip(self.convs, self.norms):
+            h_new = conv(h, edge_index)
+            h_new = norm(h_new)
+            h_new = F.relu(h_new)
+            h_new = self.dropout(h_new)
+            
+            # Connexion résiduelle
+            h = h + h_new
+        
+        # Projection finale
+        h = self.output_proj(h)
+        
+        return h
+    
+    def get_node_embeddings(
+        self,
+        node_features: torch.Tensor,
+        edge_index: torch.Tensor
+    ) -> torch.Tensor:
+        """Retourne les embeddings pour tous les nœuds."""
+        return self.forward(node_features, edge_index)
+
+
+class TeamFormationQNetwork(nn.Module):
+    """
+    Réseau Q pour l'agent DQN.
+    
+    Combine les embeddings GNN avec l'état de l'équipe pour
+    prédire les Q-values de chaque action.
+    """
+    
+    def __init__(
+        self,
+        n_skills: int,
+        n_nodes: int,
+        gnn_hidden_dim: int = 64,
+        q_hidden_dim: int = 128,
+        n_gnn_layers: int = 3
+    ):
+        super().__init__()
+        
+        self.n_nodes = n_nodes
+        self.n_skills = n_skills
+        
+        # Encodeur GNN
+        self.gnn_encoder = EmployeeGNNEncoder(
+            n_skills=n_skills,
+            hidden_dim=gnn_hidden_dim,
+            n_layers=n_gnn_layers
+        )
+        
+        # Dimension de l'état : embeddings GNN + sélection + skills couverts
+        # Pour chaque nœud : embedding (gnn_hidden) + selected (1)
+        # Plus : skills couverts (n_skills)
+        state_dim = n_nodes * (gnn_hidden_dim + 1) + n_skills
+        
+        # Réseau Q
+        self.q_network = nn.Sequential(
+            nn.Linear(state_dim, q_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(q_hidden_dim, q_hidden_dim),
+            nn.ReLU(),
+            nn.Linear(q_hidden_dim, n_nodes + 1)  # +1 pour action terminer
+        )
+    
+    def forward(
+        self,
+        node_features: torch.Tensor,
+        edge_index: torch.Tensor,
+        selected_mask: torch.Tensor,
+        skill_coverage: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Args:
+            node_features: [n_nodes, input_dim]
+            edge_index: [2, n_edges]
+            selected_mask: [n_nodes] - 1 si sélectionné
+            skill_coverage: [n_skills] - 1 si compétence couverte
+        
+        Returns:
+            Q-values [n_nodes + 1]
+        """
+        # Obtenir les embeddings GNN
+        node_embeddings = self.gnn_encoder(node_features, edge_index)
+        # [n_nodes, gnn_hidden]
+        
+        # Concaténer avec le masque de sélection
+        selected_mask = selected_mask.unsqueeze(-1)  # [n_nodes, 1]
+        node_state = torch.cat([node_embeddings, selected_mask], dim=-1)
+        # [n_nodes, gnn_hidden + 1]
+        
+        # Aplatir
+        node_state_flat = node_state.view(-1)  # [n_nodes * (gnn_hidden + 1)]
+        
+        # Concaténer avec la couverture des skills
+        state = torch.cat([node_state_flat, skill_coverage])
+        
+        # Prédire les Q-values
+        q_values = self.q_network(state)
+        
+        return q_values
+
+4.5 Code : Agent DQN
+python
+
+# src/models/dqn_agent.py
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from collections import deque
+import random
+from typing import Tuple, List
+
+class ReplayBuffer:
+    """Buffer de replay pour l'expérience."""
+    
+    def __init__(self, capacity: int = 10000):
+        self.buffer = deque(maxlen=capacity)
+    
+    def push(
+        self,
+        state: dict,
+        action: int,
+        reward: float,
+        next_state: dict,
+        done: bool
+    ):
+        self.buffer.append((state, action, reward, next_state, done))
+    
+    def sample(self, batch_size: int) -> List:
+        return random.sample(self.buffer, min(batch_size, len(self.buffer)))
+    
+    def __len__(self):
+        return len(self.buffer)
+
+
+class GCODQNAgent:
+    """
+    Agent DQN pour la formation d'équipe.
+    
+    Utilise un réseau Q combinant GNN et MLP pour estimer
+    les Q-values des actions (sélectionner un employé ou terminer).
+    """
+    
+    def __init__(
+        self,
+        n_skills: int,
+        n_nodes: int,
+        gnn_hidden_dim: int = 64,
+        q_hidden_dim: int = 128,
+        lr: float = 1e-4,
+        gamma: float = 0.99,
+        epsilon_start: float = 1.0,
+        epsilon_end: float = 0.05,
+        epsilon_decay: float = 0.995,
+        buffer_capacity: int = 10000,
+        batch_size: int = 32,
+        target_update_freq: int = 100,
+        device: str = "cpu"
+    ):
+        self.n_skills = n_skills
+        self.n_nodes = n_nodes
+        self.gamma = gamma
+        self.epsilon = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
+        self.batch_size = batch_size
+        self.target_update_freq = target_update_freq
+        self.device = torch.device(device)
+        
+        # Réseaux Q (online et target)
+        self.q_network = TeamFormationQNetwork(
+            n_skills=n_skills,
+            n_nodes=n_nodes,
+            gnn_hidden_dim=gnn_hidden_dim,
+            q_hidden_dim=q_hidden_dim
+        ).to(self.device)
+        
+        self.target_network = TeamFormationQNetwork(
+            n_skills=n_skills,
+            n_nodes=n_nodes,
+            gnn_hidden_dim=gnn_hidden_dim,
+            q_hidden_dim=q_hidden_dim
+        ).to(self.device)
+        
+        self.target_network.load_state_dict(self.q_network.state_dict())
+        self.target_network.eval()
+        
+        # Optimiseur
+        self.optimizer = optim.Adam(self.q_network.parameters(), lr=lr)
+        
+        # Buffer de replay
+        self.replay_buffer = ReplayBuffer(buffer_capacity)
+        
+        # Compteur de steps
+        self.step_count = 0
+    
+    def select_action(
+        self,
+        state: dict,
+        valid_actions: List[int],
+        training: bool = True
+    ) -> int:
+        """
+        Sélectionne une action avec epsilon-greedy.
+        """
+        if training and random.random() < self.epsilon:
+            # Exploration
+            return random.choice(valid_actions)
+        
+        # Exploitation
+        with torch.no_grad():
+            q_values = self._get_q_values(state)
+            
+            # Masquer les actions invalides
+            mask = torch.full_like(q_values, float('-inf'))
+            mask[valid_actions] = q_values[valid_actions]
+            
+            return mask.argmax().item()
+    
+    def _get_q_values(self, state: dict) -> torch.Tensor:
+        """Calcule les Q-values pour un état."""
+        node_features = state['node_features'].to(self.device)
+        edge_index = state['edge_index'].to(self.device)
+        selected_mask = state['selected_mask'].to(self.device)
+        skill_coverage = state['skill_coverage'].to(self.device)
+        
+        return self.q_network(
+            node_features,
+            edge_index,
+            selected_mask,
+            skill_coverage
+        )
+    
+    def store_transition(
+        self,
+        state: dict,
+        action: int,
+        reward: float,
+        next_state: dict,
+        done: bool
+    ):
+        """Stocke une transition dans le buffer."""
+        self.replay_buffer.push(state, action, reward, next_state, done)
+    
+    def train_step(self) -> float:
+        """Effectue une étape d'entraînement."""
+        if len(self.replay_buffer) < self.batch_size:
+            return 0.0
+        
+        # Échantillonner
+        batch = self.replay_buffer.sample(self.batch_size)
+        
+        states, actions, rewards, next_states, dones = zip(*batch)
+        
+        # Calculer les Q-values actuelles
+        q_values_list = []
+        for state in states:
+            q_values = self._get_q_values(state)
+            q_values_list.append(q_values)
+        
+        q_values = torch.stack(q_values_list)  # [batch, n_actions]
+        actions_tensor = torch.tensor(actions, device=self.device)
+        rewards_tensor = torch.tensor(rewards, dtype=torch.float32, device=self.device)
+        dones_tensor = torch.tensor(dones, dtype=torch.float32, device=self.device)
+        
+        # Q-values des actions prises
+        q_taken = q_values.gather(1, actions_tensor.unsqueeze(1)).squeeze(1)
+        
+        # Calculer les Q-values cibles
+        with torch.no_grad():
+            next_q_values_list = []
+            for next_state in next_states:
+                next_q = self.target_network(
+                    next_state['node_features'].to(self.device),
+                    next_state['edge_index'].to(self.device),
+                    next_state['selected_mask'].to(self.device),
+                    next_state['skill_coverage'].to(self.device)
+                )
+                next_q_values_list.append(next_q)
+            
+            next_q_values = torch.stack(next_q_values_list)
+            max_next_q = next_q_values.max(dim=1)[0]
+            
+            targets = rewards_tensor + self.gamma * max_next_q * (1 - dones_tensor)
+        
+        # Loss
+        loss = nn.MSELoss()(q_taken, targets)
+        
+        # Backprop
+        self.optimizer.zero_grad()
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.q_network.parameters(), 1.0)
+        self.optimizer.step()
+        
+        # Mise à jour du réseau target
+        self.step_count += 1
+        if self.step_count % self.target_update_freq == 0:
+            self.target_network.load_state_dict(self.q_network.state_dict())
+        
+        # Décroissance epsilon
+        self.epsilon = max(
+            self.epsilon_end,
+            self.epsilon * self.epsilon_decay
+        )
+        
+        return loss.item()
+
+4.6 Code : Script d'entraînement
+python
+
+# src/train.py
+import torch
+import numpy as np
+import networkx as nx
+from typing import List, Set, Dict
+import json
+import matplotlib.pyplot as plt
+
+from environment.team_formation_env import TeamFormationEnv
+from models.dqn_agent import GCODQNAgent
+
+def prepare_state(env: TeamFormationEnv, device: str = "cpu") -> Dict:
+    """Prépare l'état pour le réseau de neurones."""
+    # Features des nœuds
+    node_features = []
+    for i in range(env.n_nodes):
+        skills = env.graph.nodes[i].get('skills', set())
+        skill_vec = [1.0 if s in skills else 0.0 for s in env.all_skills]
+        level = env.graph.nodes[i].get('level', 3) / 5.0
+        degree = env.graph.degree(i) / max(1, env.n_nodes - 1)
+        node_features.append(skill_vec + [level, degree])
+    
+    node_features = torch.tensor(node_features, dtype=torch.float32)
+    
+    # Arêtes
+    edges = list(env.graph.edges())
+    if edges:
+        edge_index = torch.tensor(
+            [[e[0] for e in edges] + [e[1] for e in edges],
+             [e[1] for e in edges] + [e[0] for e in edges]],
+            dtype=torch.long
+        )
+    else:
+        edge_index = torch.zeros((2, 0), dtype=torch.long)
+    
+    # Masque de sélection
+    selected_mask = torch.zeros(env.n_nodes, dtype=torch.float32)
+    for i in env.selected:
+        selected_mask[i] = 1.0
+    
+    # Couverture des skills
+    skill_coverage = torch.zeros(len(env.all_skills), dtype=torch.float32)
+    for i, skill in enumerate(env.all_skills):
+        if skill in env.covered_skills:
+            skill_coverage[i] = 1.0
+    
+    return {
+        'node_features': node_features,
+        'edge_index': edge_index,
+        'selected_mask': selected_mask,
+        'skill_coverage': skill_coverage
+    }
+
+def get_valid_actions(env: TeamFormationEnv) -> List[int]:
+    """Retourne les actions valides."""
+    valid = [i for i in range(env.n_nodes) if i not in env.selected]
+    valid.append(env.n_nodes)  # Action terminer
+    return valid
+
+def train_episode(
+    env: TeamFormationEnv,
+    agent: GCODQNAgent,
+    training: bool = True
+) -> Dict:
+    """Exécute un épisode d'entraînement."""
+    state, _ = env.reset()
+    state_dict = prepare_state(env)
+    
+    total_reward = 0.0
+    done = False
+    losses = []
+    
+    while not done:
+        valid_actions = get_valid_actions(env)
+        
+        # Sélectionner une action
+        action = agent.select_action(state_dict, valid_actions, training)
+        
+        # Exécuter
+        next_state, reward, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+        
+        next_state_dict = prepare_state(env)
+        
+        # Stocker la transition
+        if training:
+            agent.store_transition(
+                state_dict, action, reward, next_state_dict, done
+            )
+            loss = agent.train_step()
+            if loss > 0:
+                losses.append(loss)
+        
+        state_dict = next_state_dict
+        total_reward += reward
+    
+    return {
+        'total_reward': total_reward,
+        'team_size': len(env.selected),
+        'skill_coverage': info['skill_coverage'],
+        'disruption': info['disruption'],
+        'selected': list(env.selected),
+        'avg_loss': np.mean(losses) if losses else 0.0
+    }
+
+def evaluate(
+    env: TeamFormationEnv,
+    agent: GCODQNAgent,
+    n_episodes: int = 10
+) -> Dict:
+    """Évalue l'agent."""
+    results = []
+    for _ in range(n_episodes):
+        result = train_episode(env, agent, training=False)
+        results.append(result)
+    
+    return {
+        'avg_reward': np.mean([r['total_reward'] for r in results]),
+        'avg_team_size': np.mean([r['team_size'] for r in results]),
+        'avg_skill_coverage': np.mean([r['skill_coverage'] for r in results]),
+        'avg_disruption': np.mean([r['disruption'] for r in results]),
+        'success_rate': np.mean([r['skill_coverage'] >= 1.0 for r in results])
+    }
+
+def main():
+    # Charger les données
+    with open("data/sample_org.json", "r") as f:
+        data = json.load(f)
+    
+    # Reconstruire le graphe
+    G = nx.Graph()
+    for node in data['nodes']:
+        G.add_node(
+            node['id'],
+            department=node['department'],
+            skills=set(node['skills']),
+            level=node['level']
+        )
+    G.add_edges_from(data['edges'])
+    
+    all_skills = data['all_skills']
+    project_skills = set(data['project_skills'])
+    
+    print(f"Graphe: {G.number_of_nodes()} nœuds, {G.number_of_edges()} arêtes")
+    print(f"Compétences projet: {project_skills}")
+    
+    # Créer l'environnement
+    env = TeamFormationEnv(
+        graph=G,
+        project_skills=project_skills,
+        all_skills=all_skills,
+        max_team_size=15,
+        skill_weight=2.0,
+        disruption_weight=0.5
+    )
+    
+    # Créer l'agent
+    agent = GCODQNAgent(
+        n_skills=len(all_skills),
+        n_nodes=G.number_of_nodes(),
+        gnn_hidden_dim=64,
+        q_hidden_dim=128,
+        lr=1e-4,
+        gamma=0.99,
+        epsilon_start=1.0,
+        epsilon_end=0.05,
+        epsilon_decay=0.995,
+        batch_size=32,
+        target_update_freq=50
+    )
+    
+    # Entraînement
+    n_episodes = 500
+    rewards = []
+    coverages = []
+    disruptions = []
+    
+    print("\nDébut de l'entraînement...")
+    for episode in range(n_episodes):
+        result = train_episode(env, agent, training=True)
+        
+        rewards.append(result['total_reward'])
+        coverages.append(result['skill_coverage'])
+        disruptions.append(result['disruption'])
+        
+        if (episode + 1) % 50 == 0:
+            eval_result = evaluate(env, agent, n_episodes=5)
+            print(f"\nÉpisode {episode + 1}/{n_episodes}")
+            print(f"  Epsilon: {agent.epsilon:.3f}")
+            print(f"  Reward moyen (train): {np.mean(rewards[-50:]):.2f}")
+            print(f"  Couverture skills (eval): {eval_result['avg_skill_coverage']:.2%}")
+            print(f"  Taille équipe (eval): {eval_result['avg_team_size']:.1f}")
+            print(f"  Perturbation (eval): {eval_result['avg_disruption']:.3f}")
+            print(f"  Taux de succès: {eval_result['success_rate']:.2%}")
+    
+    # Évaluation finale
+    print("\n" + "=" * 50)
+    print("ÉVALUATION FINALE")
+    print("=" * 50)
+    
+    final_eval = evaluate(env, agent, n_episodes=20)
+    print(f"Reward moyen: {final_eval['avg_reward']:.2f}")
+    print(f"Taille équipe moyenne: {final_eval['avg_team_size']:.1f}")
+    print(f"Couverture skills moyenne: {final_eval['avg_skill_coverage']:.2%}")
+    print(f"Perturbation moyenne: {final_eval['avg_disruption']:.3f}")
+    print(f"Taux de succès: {final_eval['success_rate']:.2%}")
+    
+    # Visualiser les résultats
+    fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+    
+    axes[0, 0].plot(rewards)
+    axes[0, 0].set_title("Récompense par épisode")
+    axes[0, 0].set_xlabel("Épisode")
+    axes[0, 0].set_ylabel("Récompense")
+    
+    axes[0, 1].plot(coverages)
+    axes[0, 1].set_title("Couverture des compétences")
+    axes[0, 1].set_xlabel("Épisode")
+    axes[0, 1].set_ylabel("Couverture")
+    
+    axes[1, 0].plot(disruptions)
+    axes[1, 0].set_title("Perturbation organisationnelle")
+    axes[1, 0].set_xlabel("Épisode")
+    axes[1, 0].set_ylabel("Perturbation")
+    
+    # Moyennes mobiles
+    window = 20
+    axes[1, 1].plot(np.convolve(rewards, np.ones(window)/window, mode='valid'))
+    axes[1, 1].set_title(f"Récompense (moyenne mobile {window})")
+    axes[1, 1].set_xlabel("Épisode")
+    axes[1, 1].set_ylabel("Récompense")
+    
+    plt.tight_layout()
+    plt.savefig("training_results.png", dpi=150)
+    plt.show()
+    
+    print("\nRésultats sauvegardés dans training_results.png")
+
+if __name__ == "__main__":
+    main()
+
+5. Résultats attendus du PoC
+5.1 Métriques à évaluer
+Métrique	Description	Objectif
+Taux de couverture	% de compétences projet couvertes	> 95%
+Taille d'équipe	Nombre d'employés sélectionnés	Minimiser
+Perturbation	Impact sur le réseau organisationnel	Minimiser
+Récompense cumulée	Score global	Maximiser
+Temps d'inférence	Temps pour former une équipe	< 1s
+5.2 Comparaison avec baselines
+
+Le PoC devrait comparer GCO-DQN avec :
+
+    Greedy : sélectionner les employés avec le plus de compétences requises
+
+    Random : sélection aléatoire
+
+    Centralité : sélectionner les employés les plus centraux
+
+    ILP (Integer Linear Programming) : solution optimale (si tractable)
+
+6. Extensions possibles du PoC
+
+    Ajouter des contraintes réalistes :
+
+        Budget (coût des employés)
+
+        Disponibilité temporelle
+
+        Contraintes hiérarchiques (un manager par équipe)
+
+    Améliorer le GNN :
+
+        Utiliser des edge features (fréquence de communication)
+
+        Graph Transformer au lieu de GCN/GAT
+
+    Multi-projets :
+
+        Former plusieurs équipes simultanément
+
+        Éviter les conflits de ressources
+
+    Explicabilité :
+
+        Visualiser les embeddings appris
+
+        Identifier les employés clés
+
+7. Dépendances
+txt
+
+# requirements.txt
+torch>=2.0.0
+torch-geometric>=2.3.0
+networkx>=3.0
+numpy>=1.24.0
+gymnasium>=0.28.0
+matplotlib>=3.7.0
+scipy>=1.10.0
+
+8. Références clés
+
+    Lv, B., Jiang, J., Wu, L., & Zhao, H. (2024). Team formation in large organizations: A deep reinforcement learning approach. Decision Support Systems, 187, 114343.
+
+    Kipf, T. N., & Welling, M. (2017). Semi-Supervised Classification with Graph Convolutional Networks. ICLR.
+
+    Veličković, P., et al. (2018). Graph Attention Networks. ICLR.
+
+    Mnih, V., et al. (2015). Human-level control through deep reinforcement learning. Nature, 518(7540), 529-533.
